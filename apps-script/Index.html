@@ -228,11 +228,10 @@ pre,.checks label{background:var(--surface-2);border:1px solid var(--line)}
 dialog{border-color:var(--line-strong);box-shadow:0 24px 60px #0f291e26}
 .toast{box-shadow:0 12px 32px #0f291e2e}
 
-/* v2.2 status colour: colour means "needs you". 내 차례 amber, 오류 red; 완료·진행 중·대기 are neutral and differ by glyph and label. */
+/* v2.2 status colour: colour means "needs you". 내 차례 amber, 오류 red; 완료·진행 중·대기 are neutral and differ by label (진행 중's dot pulses, 대기 has none). */
 .wf-chip.ok,.wf-chip.run,.wf-chip.wait{background:#f2f5f3;border-color:#e0e7e2;color:#4f615a}
-.wf-chip.ok::before{content:"✓";font-weight:800}
-.wf-chip.run::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;animation:wf-pulse 1.6s ease-in-out infinite}
-.wf-chip.wait::before{content:"";width:6px;height:6px;border-radius:50%;border:1.5px solid currentColor}
+.wf-chip.run::before{animation:wf-pulse 1.6s ease-in-out infinite}
+.wf-chip.wait::before{content:none}
 @keyframes wf-pulse{50%{opacity:.25}}
 .wf-topic.run,.wf-topic.ok{border-left-color:#d8e0da}.wf-topic.err{border-left-color:#d06a5f}
 .wf-summary.run,.wf-summary.ok{border-left-color:#cfd8d3}.wf-summary.err{border-left-color:#d06a5f}
