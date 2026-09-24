@@ -107,7 +107,7 @@ function api(op,p){owner_();p=p||{};if(op==='workflow')return workflowAPI_(p);if
  if(['state','diagnostics','driveList','drivePackageAudit','drivePreview','driveText'].includes(op)){
   // Reading outside the lock could catch the archive mid-write. Readers wait for the writer instead.
   const snapshot=readShared_();
-  if(op==='state')return Object.assign(snapshot,{environment:'cloud',llmReady:false,chatMode:'manual',model:'',geminiFreeStatus:'FREE_UNAVAILABLE',dailyLimit:Number(props_().getProperty('DAILY_LLM_LIMIT')||30),geminiAux:geminiAuxEnv_(snapshot)});
+  if(op==='state'){ensureAutoRefresh_();return Object.assign(snapshot,{environment:'cloud',llmReady:false,chatMode:'manual',model:'',geminiFreeStatus:'FREE_UNAVAILABLE',dailyLimit:Number(props_().getProperty('DAILY_LLM_LIMIT')||30),geminiAux:geminiAuxEnv_(snapshot)});}
   if(op==='diagnostics')return diagnostics_(snapshot);
   if(op==='drivePackageAudit')return drivePackageAudit_(p);
   if(op==='drivePreview')return drivePreview_(p);
@@ -960,3 +960,64 @@ function repairPublicationPair20260912(){
   return {changed:false,retired:true,renamed:[],summary:items.map(i=>({id:i.id,title:i.title,stage:i.workflow.stage}))};
  });
 }
+
+/* Background pickup of ChatGPT results, so the owner never presses 결과 불러오기.
+   Every topic waiting on GPT (or on an approval GPT records in Drive) gets the same refresh as the
+   manual button. A folder-listing fingerprint gates that refresh: an idle run costs a few Drive
+   listings instead of hashing every PNG/ZIP, which keeps 144 runs/day inside the trigger quota. */
+const AUTO_STAGES_=['RESEARCH','RESEARCH_REVIEW','ARCHITECTURE','EDITORIAL_REVIEW','PRODUCTION','PUBLICATION_REVIEW'];
+const AUTO_MY_TURN_=['RESEARCH_REVIEW','EDITORIAL_REVIEW','PUBLICATION_REVIEW','PRODUCED'];
+const AUTO_PER_RUN_=4,AUTO_BUDGET_MS_=240000;
+function autoFingerprint_(w,io){
+ const r=w.repository,parts=[];
+ const walk=(id,depth)=>{for(const f of io.list(id)){parts.push([f.id,f.name,f.updatedAt||''].join(':'));if(f.folder&&depth>0)walk(f.id,depth-1)}};
+ walk(r.researchFolderId,0);walk(r.folderId,0);walk(r.productionFolderId,2);
+ return pipelineHash_(parts.sort().join('\n'));
+}
+function autoCandidates_(s){return s.items.filter(i=>!i.demo&&!String(i.title||'').startsWith('[검증용')&&i.workflow?.authorizedAt&&i.workflow.repository&&AUTO_STAGES_.includes(i.workflow.stage))}
+function autoRefreshWaitingTopics(){
+ triggerOwner_();
+ const started=Date.now(),p=props_(),s=readShared_(),all=autoCandidates_(s);
+ if(!all.length)return {checked:0};
+ const fps=JSON.parse(p.getProperty('AUTO_FP')||'{}'),offset=Number(p.getProperty('AUTO_CURSOR')||0)%all.length;
+ const queue=all.slice(offset).concat(all.slice(0,offset)).slice(0,AUTO_PER_RUN_),notices=[];
+ let checked=0;
+ for(const i of queue){
+  if(Date.now()-started>AUTO_BUDGET_MS_)break;
+  checked++;
+  try{
+   const before=i.workflow.stage,fp=autoFingerprint_(i.workflow,wfDriveIO_());
+   if(fps[i.id]===fp)continue;
+   let next=workflowAPI_({id:i.id,version:i.version,action:'refresh'});
+   // Gate 3 receipts carry the real conversation link; adopt it rather than asking for it.
+   const url=next.workflow.architectureApproval?.conversationUrl;
+   if(!next.workflow.conversationUrl&&/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(url||''))next=workflowAPI_({id:next.id,version:next.version,action:'conversation',url});
+   // Measured after the refresh: its own readable-copy writes must not look like new GPT output.
+   fps[i.id]=autoFingerprint_(next.workflow,wfDriveIO_());
+   if(next.workflow.stage!==before&&AUTO_MY_TURN_.includes(next.workflow.stage))notices.push({title:next.title,stage:stageDisplay_(next),id:next.id});
+  }catch(e){
+   const message=String(e&&e.message||e);
+   // Lock contention is transient; retry next run. Anything else stems from the files, so wait for them to change and say so once.
+   if(/다른 작업을 처리 중|다른 화면에서 변경/.test(message))continue;
+   try{fps[i.id]=autoFingerprint_(i.workflow,wfDriveIO_())}catch(_){}
+   notices.push({title:i.title,stage:'자동 확인 오류 · '+message.slice(0,200),id:i.id});
+  }
+ }
+ const live=new Set(all.map(i=>i.id));for(const id of Object.keys(fps))if(!live.has(id))delete fps[id];
+ p.setProperties({AUTO_FP:JSON.stringify(fps),AUTO_CURSOR:String((offset+checked)%all.length),AUTO_LAST_RUN:nowISO()});
+ if(notices.length)autoNotify_(notices);
+ return {checked,notices:notices.length};
+}
+function autoNotify_(notices){
+ if(MailApp.getRemainingDailyQuota()<1)return;
+ let url='';try{url=ScriptApp.getService().getUrl()||''}catch(e){}
+ MailApp.sendEmail({to:props_().getProperty('OWNER_EMAIL'),subject:'[SEMI STUDIO] 확인할 주제 '+notices.length+'건',
+  body:['ChatGPT 결과를 자동으로 불러왔습니다. 아래 주제를 확인해 주세요.','',...notices.map(n=>'· '+n.title+'\n  '+n.stage+' ('+n.id+')'),'',url?'웹앱 열기: '+url:''].join('\n')});
+}
+/* Installed on the first page load after deploy; also runnable from the editor. */
+function setupAutoRefresh(){
+ const p=props_();
+ if(!ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==='autoRefreshWaitingTopics'))ScriptApp.newTrigger('autoRefreshWaitingTopics').timeBased().everyMinutes(10).create();
+ p.setProperty('AUTO_REFRESH_INSTALLED','1');return '10분마다 ChatGPT 결과 자동 확인이 켜졌습니다.';
+}
+function ensureAutoRefresh_(){try{if(props_().getProperty('AUTO_REFRESH_INSTALLED')!=='1')setupAutoRefresh()}catch(e){}}
